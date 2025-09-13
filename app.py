@@ -6,9 +6,14 @@ from dotenv import load_dotenv
 import numpy as np
 from datetime import datetime
 import time
+from datetime import datetime, timedelta  # Add timedelta to existing import
 import threading
 from contextlib import contextmanager
 from functools import lru_cache
+
+# Add this after your imports, before function definitions
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = 1
 
 # Load environment variables
 load_dotenv()
@@ -138,20 +143,169 @@ def save_daily_update(date, completed, in_progress, blockers, priority1, priorit
         return None
 
 def display_daily_updates():
-    st.header("📊 Previous Entries")
+    st.header("📊 Advanced Entry Browser")
+    
+    # Create search and controls layout
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        search_term = st.text_input("🔍 Search content:", 
+                                  placeholder="Search keywords, tickets, blockers...")
+    
+    with col2:
+        items_per_page = st.selectbox("Entries per page:", [5, 10, 25], index=0)
+    
+    with col3:
+        sort_order = st.selectbox("Sort by:", ["Newest first", "Oldest first"])
+    
+    # Date range filter
+    st.subheader("📅 Date Filter", help="Filter entries by date range")
+    date_col1, date_col2 = st.columns(2)
+    
+    with date_col1:
+        start_date = st.date_input("From date:", value=None, help="Leave empty for no start date filter")
+    
+    with date_col2:
+        end_date = st.date_input("To date:", value=None, help="Leave empty for no end date filter")
+    
+    # Quick date presets
+    preset_col1, preset_col2, preset_col3, preset_col4 = st.columns(4)
+    with preset_col1:
+        if st.button("This Week", use_container_width=True):
+            today = datetime.now().date()
+            start_date = today - timedelta(days=today.weekday())
+            end_date = today
+    with preset_col2:
+        if st.button("Last 7 Days", use_container_width=True):
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=7)
+    with preset_col3:
+        if st.button("This Month", use_container_width=True):
+            today = datetime.now().date()
+            start_date = today.replace(day=1)
+            end_date = today
+    with preset_col4:
+        if st.button("Clear Dates", use_container_width=True):
+            start_date = None
+            end_date = None
+            st.rerun()
     
     try:
-        with get_db_connection() as connection:
-            cursor = connection.cursor()
-            cursor.execute("SELECT id, date, content FROM notion_entries ORDER BY date DESC")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build dynamic query based on filters
+            query_params = []
+            query_conditions = []
+            
+            # Text search condition
+            if search_term:
+                query_conditions.append("content ILIKE %s")
+                query_params.append(f"%{search_term}%")
+            
+            # Date range conditions
+            if start_date:
+                query_conditions.append("date >= %s")
+                query_params.append(start_date.strftime("%Y-%m-%d"))
+            if end_date:
+                query_conditions.append("date <= %s")
+                query_params.append(end_date.strftime("%Y-%m-%d"))
+            
+            # Build the WHERE clause
+            where_clause = "WHERE " + " AND ".join(query_conditions) if query_conditions else ""
+            
+            # Build the complete query
+            query = f"""
+                SELECT id, date, content 
+                FROM notion_entries 
+                {where_clause}
+                ORDER BY date {'DESC' if sort_order == 'Newest first' else 'ASC'}
+            """
+            
+            cursor.execute(query, query_params)
             entries = cursor.fetchall()
             
-            for entry_id, entry_date, content in entries:
-                with st.expander(f"Entry {entry_id} - {entry_date}"):
+            if not entries:
+                st.info("📭 No entries found" + 
+                       (" matching your search" if search_term else "") +
+                       (" in selected date range" if start_date or end_date else ""))
+                return
+            
+            # Pagination setup
+            total_entries = len(entries)
+            total_pages = max(1, (total_entries + items_per_page - 1) // items_per_page)
+            
+            # Page control with session state
+            page = st.session_state.current_page
+            
+            # Hidden number input for page control
+            page_input = st.number_input(
+                "Page", 
+                min_value=1, 
+                max_value=total_pages, 
+                value=page, 
+                step=1,
+                key="page_selector",
+                label_visibility="collapsed"
+            )
+            
+            # Update session state if user changes the hidden input
+            if page_input != st.session_state.current_page:
+                st.session_state.current_page = page_input
+                st.rerun()
+            
+            # Calculate slice indices
+            start_idx = (page - 1) * items_per_page
+            end_idx = min(start_idx + items_per_page, total_entries)
+            
+            # Show results info with filter summary
+            st.subheader(f"📋 Results {start_idx + 1}-{end_idx} of {total_entries}")
+            
+            # Filter summary
+            filter_summary = []
+            if search_term:
+                filter_summary.append(f"search: '{search_term}'")
+            if start_date:
+                filter_summary.append(f"from: {start_date}")
+            if end_date:
+                filter_summary.append(f"to: {end_date}")
+            
+            if filter_summary:
+                st.caption("Filters: " + " | ".join(filter_summary))
+            
+            # Display entries for current page
+            for i, (entry_id, entry_date, content) in enumerate(entries[start_idx:end_idx], start_idx + 1):
+                with st.expander(f"#️⃣ {i}. 📅 {entry_date} (Entry #{entry_id})", expanded=False):
                     st.markdown(content)
+                    st.caption(f"Entry ID: {entry_id} | Date: {entry_date}")
+            
+            # Page navigation controls
+            if total_pages > 1:
+                st.markdown("---")
+                nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+                
+                with nav_col1:
+                    if page > 1:
+                        if st.button("⬅️ Previous", use_container_width=True):
+                            st.session_state.current_page = page - 1
+                            st.rerun()
+                
+                with nav_col2:
+                    st.markdown(f"**Page {page} of {total_pages}**", help=f"Total entries: {total_entries}")
+                
+                with nav_col3:
+                    if page < total_pages:
+                        if st.button("Next ➡️", use_container_width=True):
+                            st.session_state.current_page = page + 1
+                            st.rerun()
                 
     except Exception as e:
-        st.error(f"Error loading entries: {e}")
+        st.error(f"❌ Error loading entries: {e}")
+        st.info("Please check your database connection and try again.")
+                
+    except Exception as e:
+        st.error(f"❌ Error loading entries: {e}")
+        st.info("Please check your database connection and try again.")
 
 def chat_interface():
     st.title("🤖 Jira/Notion Progress Chat")
